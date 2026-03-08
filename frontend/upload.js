@@ -4,7 +4,10 @@
  * Dependencies: None (vanilla JS). Three.js loaded separately by viewer.js.
  */
 
-const API_BASE = "http://localhost:8000";
+// Auto-detect API base: same origin in production, localhost in dev
+const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8000"
+    : window.location.origin;
 const POLL_INTERVAL_MS = 1000;
 
 // Progress stages for the progress bar

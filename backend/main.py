@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from calibration import calibrate_from_frames, CalibrationResult
@@ -36,6 +38,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve frontend — static files mounted at root as catch-all (must be after all API routes).
+# This is configured at module level after all @app decorators, see bottom of file.
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 
 
 class ReferenceMode(str, Enum):
@@ -365,3 +371,13 @@ def _select_best_frame(frames: list) -> np.ndarray:
             best_score = score
             best_frame = frame
     return best_frame
+
+
+# ---------- Serve frontend static files (must be after all API routes) ----------
+if os.path.isdir(FRONTEND_DIR):
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+    # Catch-all: serve .html, .js, .css etc. from frontend/
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

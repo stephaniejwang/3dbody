@@ -15,27 +15,39 @@ All dependencies are **Apache 2.0, MIT, CC0, or BSD** licensed. No SMPL/SMPL-X. 
 | Three.js (3D rendering) | MIT |
 | FastAPI (backend) | MIT |
 
-## Prerequisites
-
-- Python 3.9+
-- CUDA optional (CPU works, just slower)
-
-## Setup
-
-### 1. Install Python dependencies
+## Quick Start (Local)
 
 ```bash
+# Install dependencies
 cd backend
 pip install -r requirements.txt
+
+# Run (serves both API and frontend)
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-If `anny` fails to install from PyPI, install from source:
+Open **http://localhost:8000**
+
+## Deploy to Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/stephaniejwang/3dbody)
+
+Or manually:
+1. Go to [render.com](https://render.com) → New → Web Service
+2. Connect your GitHub repo `stephaniejwang/3dbody`
+3. Settings will auto-detect from `render.yaml`
+4. Click **Deploy**
+
+## Deploy with Docker
 
 ```bash
-pip install anny@git+https://github.com/naver/anny.git
+docker build -t 3dbody .
+docker run -p 8000:8000 3dbody
 ```
 
-### 2. No model downloads needed
+## Setup Details
+
+### No model downloads needed
 
 Unlike SMPL-based tools, this project uses:
 - **Anny** — installs via pip, assets bundled in the package
@@ -44,41 +56,28 @@ Unlike SMPL-based tools, this project uses:
 
 No manual model weight downloads or `models/` directory setup required.
 
-### 3. Run the backend
+If `anny` fails to install from PyPI:
 
 ```bash
-cd backend
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+pip install anny@git+https://github.com/naver/anny.git
 ```
-
-### 4. Run the frontend
-
-```bash
-cd frontend
-python3 -m http.server 3000
-```
-
-Or with live-server: `npx live-server frontend/`
-
-### 5. Open the app
-
-Go to **http://localhost:3000**
-
-Check backend health: `curl http://localhost:8000/health`
 
 ## Usage
 
-1. **Print an ArUco marker** — Visit `aruco_marker.html` in the frontend for a printable 10cm marker (most accurate method)
-2. **Record a video** — Wear form-fitting clothing, hold the reference object visible, and walk slowly in a circle
-3. **Upload** — Select the video and reference method, then upload
-4. **View results** — Interact with the 3D mesh and review measurements
+1. **Enter your height** — Improves accuracy with any reference method
+2. **Print an ArUco marker** (optional) — Visit the ArUco page for a printable 10cm marker
+3. **Record a video** — Wear form-fitting clothing, hold the reference object visible, and walk slowly in a circle
+4. **Upload** — Select the video and reference method, then upload
+5. **View results** — Interact with the 3D mesh and review measurements
+6. **Refine** — Enter your height on the results page to recalibrate
 
 ### Reference Methods (ranked by accuracy)
 
-1. **ArUco Marker** — Print the provided marker, hold it in frame. Most accurate.
-2. **A4/Letter Paper** — Hold a standard sheet of paper in frame.
-3. **Credit Card** — Hold a credit card in frame.
-4. **Enter Height** — Manual height input as fallback.
+1. **ArUco Marker + Height** — Print the provided marker, hold it in frame + enter height. Most accurate.
+2. **ArUco Marker** — Print the provided marker, hold it in frame.
+3. **A4/Letter Paper** — Hold a standard sheet of paper in frame.
+4. **Credit Card** — Hold a credit card in frame.
+5. **Height Only** — Select "No Reference Object" and enter your height.
 
 ## Architecture
 
@@ -89,10 +88,12 @@ Video Upload
   → MediaPipe pose detection on best frame
   → Estimate body phenotype from pose proportions
   → Anny generates parametric body mesh (T-pose)
+  → Filter eyeball/mouth geometry from mesh
   → Anny Anthropometry + geometric measurements
   → Return mesh + measurements to frontend
 
 Frontend renders in Three.js with measurement overlays.
+Height recalibration available post-processing.
 ```
 
 ### Key Design: Anny as Parametric Body Model
@@ -110,8 +111,10 @@ MediaPipe detects 2D/3D pose landmarks from video, which we use to estimate body
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Model load status |
+| GET | `/` | Frontend (index.html) |
 | POST | `/upload` | Upload video + reference mode, returns `{ job_id }` |
 | GET | `/status/{job_id}` | Job status + results when done |
+| POST | `/recalibrate` | Re-scale mesh using known height |
 
 ## Notes
 
@@ -120,3 +123,4 @@ MediaPipe detects 2D/3D pose landmarks from video, which we use to estimate body
 - No YOLOv8/Ultralytics (AGPL) — RT-DETR via HuggingFace Transformers is used instead
 - No auth, no database — stateless per job
 - Video files are deleted after processing (privacy)
+- Eyeball and inner-mouth geometry filtered from mesh for clean rendering
