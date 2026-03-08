@@ -89,15 +89,33 @@
                 </div>
             </div>
 
-            <!-- Height input — always visible, works with any reference mode -->
+            <!-- Body info — always visible, works with any reference mode -->
             <div class="height-section" id="height-section">
-                <h2>Your Height <span class="optional-tag" id="height-optional-tag">(optional)</span></h2>
-                <p class="hint">Providing your height improves measurement accuracy with any reference method</p>
-                <div class="height-input-group" id="height-input-group">
-                    <input type="number" id="height-value" placeholder="170" min="50" max="250" step="0.1">
-                    <div class="unit-toggle">
-                        <button class="unit-btn active" data-unit="cm">cm</button>
-                        <button class="unit-btn" data-unit="in">in</button>
+                <h2>Your Measurements <span class="optional-tag" id="height-optional-tag">(optional)</span></h2>
+                <p class="hint">Providing height and/or shoe size improves accuracy with any reference method</p>
+
+                <div class="body-info-row">
+                    <div class="body-info-field">
+                        <label for="height-value">Height</label>
+                        <div class="height-input-group" id="height-input-group">
+                            <input type="number" id="height-value" placeholder="170" min="50" max="250" step="0.1">
+                            <div class="unit-toggle">
+                                <button class="unit-btn active" data-unit="cm">cm</button>
+                                <button class="unit-btn" data-unit="in">in</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="body-info-field">
+                        <label for="shoe-size">Shoe Size</label>
+                        <div class="shoe-input-group" id="shoe-input-group">
+                            <input type="number" id="shoe-size" placeholder="10" min="1" max="20" step="0.5">
+                            <div class="unit-toggle">
+                                <button class="shoe-unit-btn unit-btn active" data-unit="us">US</button>
+                                <button class="shoe-unit-btn unit-btn" data-unit="eu">EU</button>
+                                <button class="shoe-unit-btn unit-btn" data-unit="uk">UK</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

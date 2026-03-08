@@ -38,6 +38,7 @@ const errorText = document.getElementById("error-text");
 const dismissError = document.getElementById("dismiss-error");
 const heightInputGroup = document.getElementById("height-input-group");
 const heightValue = document.getElementById("height-value");
+const shoeSize = document.getElementById("shoe-size");
 const reuploadBtn = document.getElementById("reupload-btn");
 
 const cameraInput = document.getElementById("camera-input");
@@ -45,6 +46,7 @@ const cameraBtn = document.getElementById("camera-btn");
 
 let selectedFile = null;
 let heightUnit = "cm"; // "cm" or "in"
+let shoeUnit = "us"; // "us", "eu", or "uk"
 let currentJobId = null;
 let recalUnit = "cm";
 
@@ -134,6 +136,15 @@ document.querySelectorAll("#height-input-group .unit-btn").forEach((btn) => {
     });
 });
 
+// Shoe size unit toggle
+document.querySelectorAll(".shoe-unit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".shoe-unit-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        shoeUnit = btn.dataset.unit;
+    });
+});
+
 // Init
 updateHeightRequired();
 
@@ -162,10 +173,17 @@ async function startUpload() {
         heightCm = val;
     }
 
-    // "none" reference mode requires height
+    // Parse shoe size if provided
+    let shoeSizeVal = null;
+    const rawShoe = parseFloat(shoeSize?.value);
+    if (!isNaN(rawShoe) && rawShoe > 0) {
+        shoeSizeVal = rawShoe;
+    }
+
+    // "none" reference mode requires height or shoe size
     if (referenceMode === "none") {
-        if (heightCm === null) {
-            showError("Please enter your height when not using a reference object.");
+        if (heightCm === null && shoeSizeVal === null) {
+            showError("Please enter your height or shoe size when not using a reference object.");
             return;
         }
         // Backend expects "height_cm" as the reference mode
@@ -178,6 +196,10 @@ async function startUpload() {
     formData.append("reference_mode", referenceMode);
     if (heightCm !== null) {
         formData.append("height_cm", heightCm.toString());
+    }
+    if (shoeSizeVal !== null) {
+        formData.append("shoe_size", shoeSizeVal.toString());
+        formData.append("shoe_unit", shoeUnit);
     }
 
     // Show progress

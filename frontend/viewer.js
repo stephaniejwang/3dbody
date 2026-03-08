@@ -23,7 +23,7 @@ const COLORS = {
 
 // Z-fractions matching backend measure.py (calibrated for Anny T-pose)
 const HEIGHT_FRACTIONS = {
-    chest: 0.70,
+    chest: 0.68,
     waist: 0.62,
     hip: 0.48,
     crotch: 0.45,

@@ -29,6 +29,7 @@ class InferenceResult:
     faces: np.ndarray      # (F, 3) triangular face indices
     phenotypes: dict       # Anny phenotype parameters used
     person_height_px: float  # Person's pixel height in the frame (head to feet)
+    foot_length_px: float    # Foot length in pixels (heel to toe) for shoe-size calibration
 
 
 class InferenceEngine:
@@ -108,8 +109,11 @@ class InferenceEngine:
 
         # Measure person's pixel height (head-top to feet) for reference-object calibration.
         # MediaPipe doesn't have a "top of head" landmark, so we estimate it:
-        # head top ≈ nose position - 0.3 × (nose-to-mid-shoulder distance) upward
+        # head top ≈ nose position - 0.6 × (nose-to-mid-shoulder distance) upward
         person_height_px = self._measure_person_height_px(landmarks, frame.shape)
+
+        # Measure foot length in pixels for shoe-size calibration
+        foot_length_px = self._measure_foot_length_px(landmarks, frame.shape)
 
         # Generate Anny mesh with estimated phenotypes (T-pose for measurements)
         with torch.no_grad():
@@ -125,6 +129,7 @@ class InferenceEngine:
             faces=self.tri_faces,
             phenotypes={k: round(float(v), 3) for k, v in phenotypes.items()},
             person_height_px=person_height_px,
+            foot_length_px=foot_length_px,
         )
 
     def _measure_person_height_px(self, landmarks, frame_shape: tuple) -> float:
@@ -150,6 +155,57 @@ class InferenceEngine:
         person_height = abs(feet_y - head_top_y)
         logger.info(f"Person pixel height: {person_height:.0f}px (frame {w}x{h})")
         return float(person_height)
+
+    def _measure_foot_length_px(self, landmarks, frame_shape: tuple) -> float:
+        """Measure foot length in pixels from heel to toe using MediaPipe landmarks.
+
+        MediaPipe foot landmarks:
+          27 = left ankle,  28 = right ankle
+          29 = left heel,   30 = right heel
+          31 = left foot index (toe), 32 = right foot index (toe)
+
+        Foot length = distance from heel to toe tip.
+        We measure both feet and take the average.
+        """
+        h, w = frame_shape[:2]
+
+        def lm_px(idx):
+            l = landmarks[idx]
+            return np.array([l.x * w, l.y * h])
+
+        foot_lengths = []
+
+        # Left foot: heel (29) to toe (31)
+        try:
+            left_heel = lm_px(29)
+            left_toe = lm_px(31)
+            left_vis = min(landmarks[29].visibility, landmarks[31].visibility)
+            if left_vis > 0.3:
+                left_len = float(np.linalg.norm(left_toe - left_heel))
+                if left_len > 5:  # minimum plausible pixel length
+                    foot_lengths.append(left_len)
+        except (IndexError, AttributeError):
+            pass
+
+        # Right foot: heel (30) to toe (32)
+        try:
+            right_heel = lm_px(30)
+            right_toe = lm_px(32)
+            right_vis = min(landmarks[30].visibility, landmarks[32].visibility)
+            if right_vis > 0.3:
+                right_len = float(np.linalg.norm(right_toe - right_heel))
+                if right_len > 5:
+                    foot_lengths.append(right_len)
+        except (IndexError, AttributeError):
+            pass
+
+        if foot_lengths:
+            avg = sum(foot_lengths) / len(foot_lengths)
+            logger.info(f"Foot length: {avg:.0f}px (from {len(foot_lengths)} feet)")
+            return avg
+        else:
+            logger.info("Could not measure foot length — landmarks not visible")
+            return 0.0
 
     def _estimate_phenotypes(self, landmarks, frame_shape: tuple) -> dict:
         """Estimate Anny phenotype parameters from MediaPipe pose landmarks.

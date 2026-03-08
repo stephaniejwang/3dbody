@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # In T-pose, arms extend at ~Z=0.52+, so circumference slices must
 # either avoid arm Z-levels or filter to torso-only vertices.
 LANDMARK_Z_FRACTIONS = {
-    "chest": 0.70,      # Just below arm attachment; torso-only filter needed
+    "chest": 0.68,      # Nipple/bust line — widest chest circumference
     "waist": 0.62,      # Narrowest torso point in T-pose
     "hip": 0.48,        # Below arm level — safe from arm contamination
     "crotch": 0.45,     # Crotch/inseam point
@@ -90,6 +90,8 @@ def extract_measurements(
     # In T-pose, the torso is centered around X=0 and much narrower than full span.
     x_center = float(np.median(verts_cm[:, 0]))
     torso_half_width = height_cm * 0.12  # ~20cm for a 170cm person
+    # Chest needs wider filter — the ribcage extends wider than the waist
+    chest_half_width = height_cm * 0.16  # ~27cm for a 170cm person
 
     measurements = {}
 
@@ -97,10 +99,18 @@ def extract_measurements(
     measurements["height"] = _fmt(height_cm)
 
     # Chest circumference (torso-only to exclude arms)
-    chest_z = z_min_cm + LANDMARK_Z_FRACTIONS["chest"] * height_cm
-    circ = _compute_circumference(verts_cm, chest_z, height_cm,
-                                  torso_filter=(x_center, torso_half_width))
-    measurements["chest"] = _fmt(circ if circ else 0.0)
+    # Scan a range of Z-levels near the chest to find the maximum circumference
+    # (the "chest" measurement is defined as the fullest point of the torso)
+    chest_z_nominal = z_min_cm + LANDMARK_Z_FRACTIONS["chest"] * height_cm
+    best_chest = 0.0
+    for z_offset_frac in [-0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03]:
+        test_z = chest_z_nominal + z_offset_frac * height_cm
+        circ = _compute_circumference(verts_cm, test_z, height_cm,
+                                      tolerance=height_cm * 0.015,
+                                      torso_filter=(x_center, chest_half_width))
+        if circ is not None and circ > best_chest:
+            best_chest = circ
+    measurements["chest"] = _fmt(best_chest)
 
     # Waist circumference — prefer Anny's built-in (topology-based)
     if anny_anthropometry and "waist_m" in anny_anthropometry:

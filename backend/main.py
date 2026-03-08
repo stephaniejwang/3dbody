@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from calibration import calibrate_from_frames, CalibrationResult
 from inference import InferenceEngine, InferenceResult
 from measure import extract_measurements
+from shoe_size import shoe_size_to_foot_cm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ async def upload(
     video: UploadFile = File(...),
     reference_mode: ReferenceMode = Form(...),
     height_cm: Optional[float] = Form(None),
+    shoe_size: Optional[float] = Form(None),
+    shoe_unit: Optional[str] = Form(None),
 ):
     if engine is None:
         raise HTTPException(
@@ -140,6 +143,8 @@ async def upload(
         "video_path": tmp_path,
         "reference_mode": reference_mode.value,
         "height_cm": height_cm,
+        "shoe_size": shoe_size,
+        "shoe_unit": shoe_unit or "us",
     })
 
     return {"job_id": job_id}
@@ -266,6 +271,8 @@ def _process_job(job_data: dict, job_id: str) -> dict:
     video_path = job_data["video_path"]
     reference_mode = job_data["reference_mode"]
     height_cm = job_data["height_cm"]
+    shoe_size = job_data.get("shoe_size")
+    shoe_unit = job_data.get("shoe_unit", "us")
 
     # Step 1: Extract keyframes
     _update_progress(job_id, "Extracting frames...")
@@ -317,6 +324,37 @@ def _process_job(job_data: dict, job_id: str) -> dict:
                 f"{inf_result.person_height_px:.0f}px / {cal_result.pixels_per_cm:.1f}px/cm "
                 f"= {person_height_cm:.1f} cm"
             )
+
+    # Path A2: derive pixels_per_cm from shoe size + MediaPipe foot landmarks
+    shoe_derived_ppc = None
+    if shoe_size is not None and shoe_size > 0:
+        foot_cm = shoe_size_to_foot_cm(shoe_size, shoe_unit)
+        if foot_cm is not None and inf_result.foot_length_px > 0:
+            shoe_derived_ppc = inf_result.foot_length_px / foot_cm
+            shoe_person_height_cm = inf_result.person_height_px / shoe_derived_ppc
+            if 50 < shoe_person_height_cm < 250:
+                logger.info(
+                    f"Shoe size calibration: size {shoe_size} {shoe_unit} = {foot_cm:.1f}cm foot, "
+                    f"{inf_result.foot_length_px:.0f}px → {shoe_derived_ppc:.1f}px/cm → "
+                    f"person height {shoe_person_height_cm:.1f}cm"
+                )
+                # If no reference object calibration, use shoe-derived
+                if derived_height_cm is None:
+                    derived_height_cm = shoe_person_height_cm
+                    cal_result = CalibrationResult(
+                        pixels_per_cm=shoe_derived_ppc,
+                        confidence=0.6,
+                        method_used="shoe_size",
+                        warning="Using shoe size for scale — less accurate than ArUco marker.",
+                    )
+                else:
+                    # Have both — average for better estimate
+                    avg = (derived_height_cm + shoe_person_height_cm) / 2.0
+                    logger.info(
+                        f"Combining ref object ({derived_height_cm:.1f}cm) and shoe "
+                        f"({shoe_person_height_cm:.1f}cm) → average {avg:.1f}cm"
+                    )
+                    derived_height_cm = avg
 
     # Path B: user-provided height (takes priority over derived)
     effective_height_cm = None
