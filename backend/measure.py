@@ -8,10 +8,19 @@ plus geometric cross-sectional analysis for additional measurements
 Anny outputs vertices in METERS. Z-axis is up (height).
 Mesh is in T-pose: arms extend horizontally at shoulder height.
 
+Accuracy approach:
+  - Mesh-edge interpolation: finds exact intersection of mesh edges
+    with horizontal Z-planes, giving precise cross-section contours
+    instead of relying on nearby vertex positions.
+  - Z-scanning: scans multiple Z-levels to find the widest (chest)
+    or narrowest (waist) circumference in the region.
+  - Torso filtering: excludes T-pose arm vertices from chest/waist
+    cross-sections using X-range filtering.
+
 Z-fractions calibrated for Anny's T-pose mesh topology:
   - Arms appear in cross-sections starting at ~Z=0.52 (full_x jumps)
   - Waist narrowest at Z≈0.62 (torso only)
-  - Chest at Z≈0.70 (just below where arms attach)
+  - Chest at Z≈0.68 (nipple/bust line)
   - Hip at Z≈0.48 (below arm attachment, torso only)
 
 NO SMPL, NO SMPL-X topology assumptions. Works with Anny native mesh topology.
@@ -73,6 +82,7 @@ def extract_measurements(
         scale = 1.0
 
     verts_cm = vertices * scale
+    faces_int = faces.astype(np.int32)
     z_min_cm = z_min * scale
     bbox_height_cm = height_raw * scale
 
@@ -93,23 +103,37 @@ def extract_measurements(
     # Chest needs wider filter — the ribcage extends wider than the waist
     chest_half_width = height_cm * 0.16  # ~27cm for a 170cm person
 
+    # Pre-compute edge list from faces for mesh-edge interpolation
+    edges = _get_unique_edges(faces_int)
+
     measurements = {}
 
     # Height
     measurements["height"] = _fmt(height_cm)
 
     # Chest circumference (torso-only to exclude arms)
-    # Scan a range of Z-levels near the chest to find the maximum circumference
-    # (the "chest" measurement is defined as the fullest point of the torso)
+    # Scan Z-levels every 0.5% of height in the chest region to find maximum
     chest_z_nominal = z_min_cm + LANDMARK_Z_FRACTIONS["chest"] * height_cm
     best_chest = 0.0
-    for z_offset_frac in [-0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03]:
-        test_z = chest_z_nominal + z_offset_frac * height_cm
-        circ = _compute_circumference(verts_cm, test_z, height_cm,
-                                      tolerance=height_cm * 0.015,
-                                      torso_filter=(x_center, chest_half_width))
+    scan_step = height_cm * 0.005  # 0.5% of height ≈ 0.85cm for 170cm person
+    for offset_i in range(-6, 7):  # ±3% of height in 0.5% steps = 13 samples
+        test_z = chest_z_nominal + offset_i * scan_step
+        circ = _compute_circumference_edge(
+            verts_cm, edges, test_z,
+            torso_filter=(x_center, chest_half_width),
+        )
         if circ is not None and circ > best_chest:
             best_chest = circ
+    # Fallback to vertex-based if edge method returned nothing
+    if best_chest < 1.0:
+        for offset_i in range(-6, 7):
+            test_z = chest_z_nominal + offset_i * scan_step
+            circ = _compute_circumference_vertex(
+                verts_cm, test_z, height_cm,
+                torso_filter=(x_center, chest_half_width),
+            )
+            if circ is not None and circ > best_chest:
+                best_chest = circ
     measurements["chest"] = _fmt(best_chest)
 
     # Waist circumference — prefer Anny's built-in (topology-based)
@@ -117,15 +141,44 @@ def extract_measurements(
         waist_cm = anny_anthropometry["waist_m"] * 100
         measurements["waist"] = _fmt(waist_cm)
     else:
-        waist_z = z_min_cm + LANDMARK_Z_FRACTIONS["waist"] * height_cm
-        circ = _compute_circumference(verts_cm, waist_z, height_cm,
-                                      torso_filter=(x_center, torso_half_width))
-        measurements["waist"] = _fmt(circ if circ else 0.0)
+        # Scan for the narrowest circumference in the waist region
+        waist_z_nominal = z_min_cm + LANDMARK_Z_FRACTIONS["waist"] * height_cm
+        best_waist = float("inf")
+        for offset_i in range(-4, 5):
+            test_z = waist_z_nominal + offset_i * scan_step
+            circ = _compute_circumference_edge(
+                verts_cm, edges, test_z,
+                torso_filter=(x_center, torso_half_width),
+            )
+            if circ is not None and 10 < circ < best_waist:
+                best_waist = circ
+        if best_waist == float("inf"):
+            # Vertex fallback
+            for offset_i in range(-4, 5):
+                test_z = waist_z_nominal + offset_i * scan_step
+                circ = _compute_circumference_vertex(
+                    verts_cm, test_z, height_cm,
+                    torso_filter=(x_center, torso_half_width),
+                )
+                if circ is not None and 10 < circ < best_waist:
+                    best_waist = circ
+        measurements["waist"] = _fmt(best_waist if best_waist < float("inf") else 0.0)
 
-    # Hip circumference (Z=0.48 is below arm attachment, safe)
-    hip_z = z_min_cm + LANDMARK_Z_FRACTIONS["hip"] * height_cm
-    circ = _compute_circumference(verts_cm, hip_z, height_cm)
-    measurements["hip"] = _fmt(circ if circ else 0.0)
+    # Hip circumference — scan for maximum (Z=0.48 is below arm attachment, safe)
+    hip_z_nominal = z_min_cm + LANDMARK_Z_FRACTIONS["hip"] * height_cm
+    best_hip = 0.0
+    for offset_i in range(-6, 7):
+        test_z = hip_z_nominal + offset_i * scan_step
+        circ = _compute_circumference_edge(verts_cm, edges, test_z)
+        if circ is not None and circ > best_hip:
+            best_hip = circ
+    if best_hip < 1.0:
+        for offset_i in range(-6, 7):
+            test_z = hip_z_nominal + offset_i * scan_step
+            circ = _compute_circumference_vertex(verts_cm, test_z, height_cm)
+            if circ is not None and circ > best_hip:
+                best_hip = circ
+    measurements["hip"] = _fmt(best_hip)
 
     # Inseam
     crotch_z = z_min_cm + LANDMARK_Z_FRACTIONS["crotch"] * height_cm
@@ -151,21 +204,93 @@ def _fmt(value_cm: float) -> dict:
     }
 
 
-def _compute_circumference(
+def _get_unique_edges(faces: np.ndarray) -> np.ndarray:
+    """Extract unique edges from face array.
+
+    Args:
+        faces: (F, 3) array of triangle face indices.
+
+    Returns:
+        (E, 2) array of unique edge vertex pairs.
+    """
+    # Each triangle has 3 edges
+    edges = np.vstack([
+        faces[:, [0, 1]],
+        faces[:, [1, 2]],
+        faces[:, [2, 0]],
+    ])
+    # Sort each edge so (a,b) and (b,a) are the same
+    edges = np.sort(edges, axis=1)
+    # Remove duplicates
+    edges = np.unique(edges, axis=0)
+    return edges
+
+
+def _compute_circumference_edge(
+    vertices: np.ndarray,
+    edges: np.ndarray,
+    z_level: float,
+    torso_filter: Optional[tuple] = None,
+) -> Optional[float]:
+    """Compute circumference by intersecting mesh edges with a horizontal Z-plane.
+
+    This gives exact cross-section contour points by interpolating along edges
+    that straddle the Z-level, rather than just using nearby vertices.
+    Much more accurate than vertex-based approach.
+    """
+    z_vals = vertices[:, 2]
+
+    # Find edges that cross the Z-level
+    v0_z = z_vals[edges[:, 0]]
+    v1_z = z_vals[edges[:, 1]]
+
+    # Edge crosses if one vertex is above and one is below (or on) the Z-level
+    crosses = (v0_z - z_level) * (v1_z - z_level) < 0
+    crossing_edges = edges[crosses]
+
+    if len(crossing_edges) < 3:
+        return None
+
+    # Interpolate to find exact intersection point on each crossing edge
+    v0 = vertices[crossing_edges[:, 0]]  # (N, 3)
+    v1 = vertices[crossing_edges[:, 1]]  # (N, 3)
+    z0 = v0[:, 2]
+    z1 = v1[:, 2]
+
+    # Interpolation parameter: t such that z0 + t*(z1-z0) = z_level
+    dz = z1 - z0
+    # Avoid division by zero (shouldn't happen since we filtered for crossing)
+    safe_dz = np.where(np.abs(dz) > 1e-10, dz, 1e-10)
+    t = ((z_level - z0) / safe_dz).reshape(-1, 1)
+    t = np.clip(t, 0, 1)
+
+    # Interpolated intersection points
+    intersections = v0 + t * (v1 - v0)  # (N, 3)
+
+    # Apply torso filter if requested
+    if torso_filter is not None:
+        x_center, half_width = torso_filter
+        torso_mask = np.abs(intersections[:, 0] - x_center) < half_width
+        intersections = intersections[torso_mask]
+        if len(intersections) < 3:
+            return None
+
+    # Project to XY plane (X=left/right, Y=front/back)
+    points_2d = intersections[:, [0, 1]]
+
+    return _angular_perimeter(points_2d)
+
+
+def _compute_circumference_vertex(
     vertices: np.ndarray,
     z_level: float,
     height_cm: float,
     tolerance: float = 0.5,
     torso_filter: Optional[tuple] = None,
 ) -> Optional[float]:
-    """Compute circumference at a given Z level using angular perimeter.
+    """Fallback: compute circumference using nearby vertices (less accurate).
 
-    Uses angular ordering around the centroid to trace the actual body
-    surface contour, including concavities. This is more accurate than
-    ConvexHull, which overestimates by skipping concave curves.
-
-    Args:
-        torso_filter: Optional (x_center, half_width) to exclude arm vertices.
+    Used when edge-based method fails (e.g., mesh doesn't have face data).
     """
     mask = np.abs(vertices[:, 2] - z_level) < tolerance
     section_verts = vertices[mask]
@@ -194,9 +319,8 @@ def _compute_circumference(
 def _angular_perimeter(points_2d: np.ndarray) -> Optional[float]:
     """Compute perimeter by tracing points in angular order around centroid.
 
-    This follows the actual body surface contour including concavities,
-    unlike ConvexHull which would skip inward curves and overestimate.
-    Uses radial binning to get a clean outer boundary per angular sector.
+    Uses radial binning with adaptive bin count to get a clean outer boundary.
+    Takes the outermost point per angular sector, then traces the contour.
     """
     if len(points_2d) < 3:
         return None
@@ -207,9 +331,9 @@ def _angular_perimeter(points_2d: np.ndarray) -> Optional[float]:
     angles = np.arctan2(dy, dx)
     radii = np.sqrt(dx ** 2 + dy ** 2)
 
-    # Bin by angle sector and take the outermost point per bin.
-    # This smooths out interior vertices while preserving concavities.
-    n_bins = min(72, max(24, len(points_2d) // 3))
+    # Use more bins for denser point clouds (from edge interpolation)
+    # Minimum 36 bins (10-degree sectors), up to 120 bins (3-degree sectors)
+    n_bins = min(120, max(36, len(points_2d) // 2))
     bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
     boundary_points = []
 
@@ -235,15 +359,14 @@ def _angular_perimeter(points_2d: np.ndarray) -> Optional[float]:
     order = np.argsort(bp_angles)
     boundary = boundary[order]
 
-    # Compute perimeter
-    perimeter = 0.0
-    n = len(boundary)
-    for i in range(n):
-        p1 = boundary[i]
-        p2 = boundary[(i + 1) % n]
-        perimeter += np.linalg.norm(p2 - p1)
+    # Compute perimeter as sum of distances between adjacent boundary points
+    diffs = np.diff(boundary, axis=0, append=boundary[:1])
+    # Wrap: last point to first point
+    diffs[-1] = boundary[0] - boundary[-1]
+    segment_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+    perimeter = float(segment_lengths.sum())
 
-    return float(perimeter)
+    return perimeter
 
 
 def _compute_width_at_height(
