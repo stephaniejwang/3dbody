@@ -28,6 +28,7 @@ class InferenceResult:
     vertices: np.ndarray   # (N, 3) mesh vertices in meters
     faces: np.ndarray      # (F, 3) triangular face indices
     phenotypes: dict       # Anny phenotype parameters used
+    person_height_px: float  # Person's pixel height in the frame (head to feet)
 
 
 class InferenceEngine:
@@ -105,6 +106,11 @@ class InferenceEngine:
         # Estimate phenotypes from pose landmarks
         phenotypes = self._estimate_phenotypes(landmarks, frame.shape)
 
+        # Measure person's pixel height (head-top to feet) for reference-object calibration.
+        # MediaPipe doesn't have a "top of head" landmark, so we estimate it:
+        # head top ≈ nose position - 0.3 × (nose-to-mid-shoulder distance) upward
+        person_height_px = self._measure_person_height_px(landmarks, frame.shape)
+
         # Generate Anny mesh with estimated phenotypes (T-pose for measurements)
         with torch.no_grad():
             result = self.anny_model.forward(
@@ -118,7 +124,32 @@ class InferenceEngine:
             vertices=vertices,
             faces=self.tri_faces,
             phenotypes={k: round(float(v), 3) for k, v in phenotypes.items()},
+            person_height_px=person_height_px,
         )
+
+    def _measure_person_height_px(self, landmarks, frame_shape: tuple) -> float:
+        """Measure person's full height in pixels from head-top to feet.
+
+        MediaPipe doesn't have a "top of head" landmark, so we estimate:
+          head_top ≈ nose_y - 0.6 × |nose_y - mid_shoulder_y|
+        Then take the lowest of L_ANKLE and R_ANKLE for feet.
+        """
+        h, w = frame_shape[:2]
+
+        def lm_y(idx):
+            return landmarks[idx].y * h
+
+        nose_y = lm_y(0)
+        mid_shoulder_y = (lm_y(11) + lm_y(12)) / 2
+        head_offset = abs(nose_y - mid_shoulder_y) * 0.6
+        head_top_y = nose_y - head_offset
+
+        # Lowest foot point (MediaPipe uses y-down)
+        feet_y = max(lm_y(27), lm_y(28), lm_y(31), lm_y(32))
+
+        person_height = abs(feet_y - head_top_y)
+        logger.info(f"Person pixel height: {person_height:.0f}px (frame {w}x{h})")
+        return float(person_height)
 
     def _estimate_phenotypes(self, landmarks, frame_shape: tuple) -> dict:
         """Estimate Anny phenotype parameters from MediaPipe pose landmarks.
@@ -158,38 +189,55 @@ class InferenceEngine:
         # Full body height estimate (head top to ankle)
         body_height_px = dist(NOSE, L_ANKLE)
 
-        # Shoulder-to-hip ratio is an indicator of gender/build
+        # ----- Gender -----
+        # Shoulder-to-hip ratio: male ~1.4–1.6, female ~1.0–1.2
         if hip_width > 0:
             sh_ratio = shoulder_width / hip_width
         else:
             sh_ratio = 1.0
+        gender = np.clip((sh_ratio - 1.05) / 0.55, 0.0, 1.0)
 
-        # Gender estimation: higher sh_ratio → more masculine
-        # Typical male sh_ratio ~1.4–1.6, female ~1.1–1.3
-        gender = np.clip((sh_ratio - 1.1) / 0.5, 0.0, 1.0)
-
-        # Weight estimation from shoulder-width to body-height ratio
-        # Wider relative to height → heavier build
+        # ----- Weight / build -----
+        # Use multiple cues: shoulder/height ratio + hip/height ratio + torso width
         if body_height_px > 0:
-            width_ratio = shoulder_width / body_height_px
+            shoulder_ratio = shoulder_width / body_height_px
+            hip_ratio = hip_width / body_height_px
+            # Average of shoulder and hip width relative to height
+            width_ratio = (shoulder_ratio + hip_ratio) / 2
         else:
-            width_ratio = 0.25
-        weight = np.clip((width_ratio - 0.18) / 0.14, 0.0, 1.0)
+            width_ratio = 0.2
 
-        # Muscle: correlated with weight but slightly offset
-        muscle = np.clip(weight * 0.8, 0.0, 1.0)
+        # Wider relative to height → heavier build
+        # Typical range: thin ~0.15, average ~0.20, heavy ~0.28+
+        weight = np.clip((width_ratio - 0.14) / 0.16, 0.05, 0.95)
 
-        # Height: default to 0.5 (will be scaled by calibration in main.py)
+        # ----- Muscle -----
+        # Shoulder-dominated builds → more muscle
+        # Also factor in arm thickness relative to body
+        if body_height_px > 0 and hip_width > 0:
+            shoulder_dominance = shoulder_ratio / hip_ratio if hip_ratio > 0 else 1.0
+            muscle = np.clip((shoulder_dominance - 0.9) / 0.6, 0.0, 1.0)
+            # Blend with weight — muscular people are also wider
+            muscle = np.clip(muscle * 0.6 + weight * 0.4, 0.0, 1.0)
+        else:
+            muscle = 0.5
+
+        # ----- Height -----
+        # Default to 0.5 — actual scaling is done by calibration in main.py
         height = 0.5
 
-        # Proportions: based on leg-to-torso ratio
+        # ----- Proportions -----
+        # Leg-to-torso ratio determines body proportions
+        # Short legs/long torso → low proportions, long legs → high proportions
         if torso_length > 0:
             leg_torso_ratio = leg_length / torso_length
         else:
             leg_torso_ratio = 1.5
-        proportions = np.clip((leg_torso_ratio - 1.2) / 0.6, 0.0, 1.0)
+        # Typical range: 1.3 (short legs) to 1.8 (long legs)
+        proportions = np.clip((leg_torso_ratio - 1.2) / 0.6, 0.1, 0.9)
 
-        # Age: default to young adult (0.5 maps to ~25–35 years in Anny)
+        # ----- Age -----
+        # Default to 0.5 (young adult). Could be refined with face analysis.
         age = 0.5
 
         return {

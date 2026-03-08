@@ -297,20 +297,47 @@ def _process_job(job_data: dict, job_id: str) -> dict:
     _update_progress(job_id, "Applying scale calibration...")
     anny_anthro = engine.get_anthropometry(inf_result.vertices)
 
-    # Step 5: Scale mesh to real-world cm using height if provided.
-    # Height-based scaling works with ANY reference mode — it anchors
-    # the proportional Anny mesh to the user's actual body scale.
-    # This is the single biggest accuracy improvement.
+    # Step 5: Scale mesh to real-world dimensions.
+    # Two scaling paths:
+    #   A) Reference object (ArUco/A4/credit_card): use pixels_per_cm from
+    #      calibration + person's pixel height from MediaPipe to compute
+    #      real height in cm, then scale mesh to match.
+    #   B) Height input: user provides height directly.
+    # Both can be combined — height input always takes priority if provided.
     vertices = inf_result.vertices.copy()
+    derived_height_cm = None
+
+    # Path A: derive real height from reference object + person pixel height
+    if cal_result.pixels_per_cm > 0 and reference_mode in ("aruco", "a4", "credit_card"):
+        person_height_cm = inf_result.person_height_px / cal_result.pixels_per_cm
+        if 50 < person_height_cm < 250:
+            derived_height_cm = person_height_cm
+            logger.info(
+                f"Derived person height from {reference_mode}: "
+                f"{inf_result.person_height_px:.0f}px / {cal_result.pixels_per_cm:.1f}px/cm "
+                f"= {person_height_cm:.1f} cm"
+            )
+
+    # Path B: user-provided height (takes priority over derived)
+    effective_height_cm = None
     if height_cm is not None and height_cm > 0:
+        effective_height_cm = height_cm
+        method_note = "user_height"
+    elif derived_height_cm is not None:
+        effective_height_cm = derived_height_cm
+        method_note = "ref_object"
+
+    if effective_height_cm is not None:
         mesh_height_m = anny_anthro["height_m"]
         if mesh_height_m > 0:
-            scale_factor = (height_cm / 100.0) / mesh_height_m
+            scale_factor = (effective_height_cm / 100.0) / mesh_height_m
             vertices = vertices * scale_factor
             # Re-compute anthropometry with scaled vertices
             anny_anthro = engine.get_anthropometry(vertices)
-            # Boost confidence when height is provided alongside a reference object
-            if reference_mode != "height_cm":
+            logger.info(f"Mesh scaled by {scale_factor:.3f}x ({method_note}: {effective_height_cm:.1f} cm)")
+
+            # Boost confidence when both height and reference object are used
+            if height_cm is not None and height_cm > 0 and reference_mode != "height_cm":
                 cal_result = CalibrationResult(
                     pixels_per_cm=cal_result.pixels_per_cm,
                     confidence=min(0.95, cal_result.confidence + 0.2),
