@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Body Measurement Tool</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Screen 1: Upload & Reference Selection -->
+    <div id="upload-screen" class="screen active">
+        <div class="container">
+            <h1>3D Body Measurement</h1>
+            <p class="subtitle">Upload a video to generate accurate body measurements</p>
+
+            <!-- Drop zone -->
+            <div id="drop-zone" class="drop-zone">
+                <div class="drop-zone-content">
+                    <svg class="upload-icon" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Drag & drop a video here</p>
+                    <p class="drop-zone-hint">or click to browse (mp4/mov, max 200MB)</p>
+                </div>
+                <button id="camera-btn" class="btn-camera" type="button">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="23 7 16 12 23 17 23 7"/>
+                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                    </svg>
+                    Record Video
+                </button>
+                <input type="file" id="file-input" accept=".mp4,.mov,video/mp4,video/quicktime" hidden>
+                <input type="file" id="camera-input" accept="video/*" capture="environment" hidden>
+            </div>
+            <div id="file-info" class="file-info hidden">
+                <span id="file-name"></span>
+                <button id="clear-file" class="btn-text">Remove</button>
+            </div>
+
+            <!-- Reference selection -->
+            <div class="reference-section">
+                <h2>Reference Object</h2>
+                <p class="hint">Choose how you've included scale reference in the video</p>
+
+                <div class="reference-options">
+                    <label class="reference-option">
+                        <input type="radio" name="reference" value="aruco" checked>
+                        <div class="option-card">
+                            <div class="option-header">
+                                <span class="option-badge best">Most Accurate</span>
+                                <strong>ArUco Marker</strong>
+                            </div>
+                            <p>Print a marker and hold it in frame.</p>
+                            <a href="aruco_marker.html" target="_blank" class="print-link">Print 10cm marker</a>
+                        </div>
+                    </label>
+
+                    <label class="reference-option">
+                        <input type="radio" name="reference" value="a4">
+                        <div class="option-card">
+                            <div class="option-header">
+                                <strong>A4 / Letter Paper</strong>
+                            </div>
+                            <p>Hold a standard sheet of paper in frame.</p>
+                        </div>
+                    </label>
+
+                    <label class="reference-option">
+                        <input type="radio" name="reference" value="credit_card">
+                        <div class="option-card">
+                            <div class="option-header">
+                                <strong>Credit Card</strong>
+                            </div>
+                            <p>Hold a credit card in frame.</p>
+                        </div>
+                    </label>
+
+                    <label class="reference-option">
+                        <input type="radio" name="reference" value="none">
+                        <div class="option-card">
+                            <div class="option-header">
+                                <strong>No Reference Object</strong>
+                            </div>
+                            <p>Uses height input below for scale (less accurate).</p>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Height input — always visible, works with any reference mode -->
+            <div class="height-section" id="height-section">
+                <h2>Your Height <span class="optional-tag" id="height-optional-tag">(optional)</span></h2>
+                <p class="hint">Providing your height improves measurement accuracy with any reference method</p>
+                <div class="height-input-group" id="height-input-group">
+                    <input type="number" id="height-value" placeholder="170" min="50" max="250" step="0.1">
+                    <div class="unit-toggle">
+                        <button class="unit-btn active" data-unit="cm">cm</button>
+                        <button class="unit-btn" data-unit="in">in</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="instructions-box">
+                <strong>Recording tips:</strong> Wear form-fitting clothing. Walk slowly in a circle, keeping the reference object visible.
+            </div>
+
+            <button id="upload-btn" class="btn-primary" disabled>Upload & Process</button>
+
+            <!-- Progress overlay -->
+            <div id="progress-overlay" class="progress-overlay hidden">
+                <div class="progress-card">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="progress-bar"></div>
+                    </div>
+                    <p id="progress-text" class="progress-text">Uploading video...</p>
+                    <div class="spinner"></div>
+                </div>
+            </div>
+
+            <!-- Error display -->
+            <div id="error-message" class="error-message hidden">
+                <p id="error-text"></p>
+                <button id="dismiss-error" class="btn-text">Dismiss</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Screen 2: 3D Viewer -->
+    <div id="viewer-screen" class="screen">
+        <div class="viewer-layout">
+            <!-- 3D Canvas -->
+            <div id="viewer-container" class="viewer-container">
+                <canvas id="three-canvas"></canvas>
+            </div>
+
+            <!-- Sidebar -->
+            <div id="sidebar" class="sidebar">
+                <h2>Measurements</h2>
+
+                <!-- Unit toggle -->
+                <div class="unit-toggle-bar">
+                    <button class="unit-btn active" data-unit="cm" id="unit-cm">cm</button>
+                    <button class="unit-btn" data-unit="in" id="unit-in">in</button>
+                </div>
+
+                <!-- Calibration badge -->
+                <div id="calibration-badge" class="calibration-badge">
+                    <span class="badge-dot"></span>
+                    <span id="calibration-text">Calibration: --</span>
+                </div>
+                <p id="calibration-warning" class="calibration-warning hidden"></p>
+
+                <!-- Measurement list -->
+                <div id="measurement-list" class="measurement-list"></div>
+
+                <!-- Height recalibration -->
+                <div id="recalibrate-section" class="recalibrate-section">
+                    <h3>Refine with your height</h3>
+                    <p class="hint">Enter your actual height to improve all measurements</p>
+                    <div class="recalibrate-row">
+                        <input type="number" id="recal-height" placeholder="170" min="50" max="250" step="0.1">
+                        <div class="unit-toggle">
+                            <button class="unit-btn recal-unit active" data-unit="cm">cm</button>
+                            <button class="unit-btn recal-unit" data-unit="in">in</button>
+                        </div>
+                        <button id="recal-btn" class="btn-recalibrate">Apply</button>
+                    </div>
+                    <p id="recal-status" class="recal-status hidden"></p>
+                </div>
+
+                <!-- Re-upload -->
+                <button id="reupload-btn" class="btn-secondary">Re-upload</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js (MIT) loaded from CDN -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="upload.js"></script>
+    <script type="module" src="viewer.js"></script>
+</body>
+</html>

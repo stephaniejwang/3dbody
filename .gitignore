@@ -1,0 +1,36 @@
+# Model weights — do not commit
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.bin
+models/*.onnx
+models/*.safetensors
+
+# Uploaded videos
+uploads/
+*.mp4
+*.mov
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/

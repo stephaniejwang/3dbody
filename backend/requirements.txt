@@ -1,0 +1,31 @@
+# Backend dependencies — all Apache 2.0, MIT, or BSD licensed.
+# NO SMPL, NO SMPL-X, NO YOLOv8/Ultralytics (AGPL).
+
+# Web framework (MIT)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Computer vision (Apache 2.0)
+opencv-contrib-python>=4.8.0
+
+# Scientific computing (BSD)
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Deep learning (BSD)
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Body model — Anny (Apache 2.0 + CC0)
+# Install from GitHub for latest: pip install anny@git+https://github.com/naver/anny.git
+anny
+
+# Pose estimation — MediaPipe (Apache 2.0)
+mediapipe>=0.10.0
+
+# Object detection — HuggingFace Transformers for RT-DETR (Apache 2.0)
+transformers>=4.35.0
+
+# Image handling
+Pillow>=10.0.0
