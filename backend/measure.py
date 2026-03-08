@@ -98,10 +98,10 @@ def extract_measurements(
 
     # Compute torso X-range for filtering arm vertices from circumference slices.
     # In T-pose, the torso is centered around X=0 and much narrower than full span.
+    # Analysis shows arms enter at Z≥0.53 with X ±54cm. With 12% filter (±20cm),
+    # arm roots don't contaminate until Z≥0.73. So 12% is safe for chest (Z=0.64-0.68).
     x_center = float(np.median(verts_cm[:, 0]))
     torso_half_width = height_cm * 0.12  # ~20cm for a 170cm person
-    # Chest needs wider filter — the ribcage extends wider than the waist
-    chest_half_width = height_cm * 0.16  # ~27cm for a 170cm person
 
     # Pre-compute edge list from faces for mesh-edge interpolation
     edges = _get_unique_edges(faces_int)
@@ -112,25 +112,27 @@ def extract_measurements(
     measurements["height"] = _fmt(height_cm)
 
     # Chest circumference (torso-only to exclude arms)
-    # Scan Z-levels every 0.5% of height in the chest region to find maximum
+    # Scan Z-levels near the chest to find the widest torso circumference.
+    # Scan range: Z-frac 0.64 to 0.68 (safe from arm contamination with 12% filter).
+    # Analysis shows 12% filter is clean up to Z=0.72, so this range is safe.
     chest_z_nominal = z_min_cm + LANDMARK_Z_FRACTIONS["chest"] * height_cm
     best_chest = 0.0
     scan_step = height_cm * 0.005  # 0.5% of height ≈ 0.85cm for 170cm person
-    for offset_i in range(-6, 7):  # ±3% of height in 0.5% steps = 13 samples
+    for offset_i in range(-8, 1):  # scan below nominal only (0.64 to 0.68)
         test_z = chest_z_nominal + offset_i * scan_step
         circ = _compute_circumference_edge(
             verts_cm, edges, test_z,
-            torso_filter=(x_center, chest_half_width),
+            torso_filter=(x_center, torso_half_width),
         )
         if circ is not None and circ > best_chest:
             best_chest = circ
     # Fallback to vertex-based if edge method returned nothing
     if best_chest < 1.0:
-        for offset_i in range(-6, 7):
+        for offset_i in range(-8, 1):
             test_z = chest_z_nominal + offset_i * scan_step
             circ = _compute_circumference_vertex(
                 verts_cm, test_z, height_cm,
-                torso_filter=(x_center, chest_half_width),
+                torso_filter=(x_center, torso_half_width),
             )
             if circ is not None and circ > best_chest:
                 best_chest = circ

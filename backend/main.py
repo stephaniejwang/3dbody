@@ -382,6 +382,15 @@ def _process_job(job_data: dict, job_id: str) -> dict:
                     method_used=f"{cal_result.method_used}+height",
                     warning=None,
                 )
+    else:
+        # No scaling source available — fail clearly.
+        # The code MUST detect a scaling reference (height, shoe size, or
+        # reference object). Without one, measurements would be meaningless.
+        raise ValueError(
+            "Could not determine your real-world scale. "
+            "Please provide your height, shoe size, or ensure the reference "
+            "object (ArUco marker, A4 paper, or credit card) is clearly visible in the video."
+        )
 
     # Convert to cm for frontend display
     vertices_cm = vertices * 100.0
