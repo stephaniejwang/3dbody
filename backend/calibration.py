@@ -3,7 +3,9 @@ Scale calibration from reference objects.
 
 Supported methods:
   - ArUco marker detection (cv2.aruco, Apache 2.0)
-  - Known object detection via HuggingFace RT-DETR (Apache 2.0) — NOT YOLOv8 (AGPL)
+  - A4/credit card detection: contour-based with white/light color
+    filtering, perspective correction, and aspect ratio matching.
+    RT-DETR is used as a secondary signal when available.
   - Manual height input fallback
 
 NO SMPL, NO SMPL-X, NO YOLOv8/Ultralytics.
@@ -113,6 +115,180 @@ def _calibrate_aruco(
     )
 
 
+def _calibrate_known_object(
+    frames: list,
+    object_type: str,
+) -> CalibrationResult:
+    """Detect a known object (A4 paper or credit card) using contour analysis.
+
+    Primary method: find white/light rectangular contours with the expected
+    aspect ratio. This is more reliable than RT-DETR for paper/card detection
+    because RT-DETR has no "paper" class and detects unrelated objects.
+
+    The contour method:
+      1. Converts to grayscale, thresholds for light regions (paper is white/light)
+      2. Finds rectangular contours with 4 corners
+      3. Uses perspective-corrected dimensions (not bounding box) for accuracy
+      4. Matches aspect ratio tightly against A4 (1.414) or credit card (1.585)
+      5. Filters by size relative to frame
+    """
+    obj = KNOWN_OBJECTS[object_type]
+    expected_ratio = max(obj["width_cm"], obj["height_cm"]) / min(
+        obj["width_cm"], obj["height_cm"]
+    )
+
+    detections = _detect_with_contours(frames, obj, expected_ratio)
+
+    if not detections:
+        logger.warning(f"Contour detection found no {obj['label']}. Trying RT-DETR fallback.")
+        model, processor = _get_rtdetr()
+        if model is not None:
+            detections = _detect_with_rtdetr(frames, obj, expected_ratio, model, processor)
+
+    if not detections:
+        return CalibrationResult(
+            pixels_per_cm=0.0,
+            confidence=0.0,
+            method_used="contour",
+            warning=f"Could not detect {obj['label']}. Ensure it's clearly visible, flat, and well-lit.",
+        )
+
+    median_ppc = float(np.median(detections))
+
+    # Compute confidence from consistency of detections
+    if len(detections) >= 3:
+        std = float(np.std(detections))
+        cv_coeff = std / median_ppc if median_ppc > 0 else 1.0
+        confidence = min(0.75, max(0.3, 0.75 - cv_coeff * 3))
+    else:
+        confidence = min(0.5, len(detections) * 0.15)
+
+    logger.info(
+        f"Calibration: {len(detections)} detections, "
+        f"median {median_ppc:.2f} px/cm, confidence {confidence:.2f}"
+    )
+
+    return CalibrationResult(
+        pixels_per_cm=median_ppc,
+        confidence=round(confidence, 2),
+        method_used="contour",
+        warning=None if confidence >= 0.4 else
+            f"Low confidence detecting {obj['label']}. Consider using an ArUco marker.",
+    )
+
+
+def _detect_with_contours(
+    frames: list,
+    obj: dict,
+    expected_ratio: float,
+) -> list:
+    """Detect rectangular light-colored object via contour analysis.
+
+    Tuned for white/light paper and cards against typical backgrounds.
+    Uses perspective-corrected side lengths for accurate pixel/cm conversion.
+    """
+    detections = []
+
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_h, frame_w = gray.shape[:2]
+        frame_area = frame_h * frame_w
+
+        # Threshold for white/light regions (paper is typically bright)
+        # Use adaptive threshold to handle varying lighting
+        _, bright_mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+
+        # Also try adaptive threshold for uneven lighting
+        adaptive_mask = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 51, -10
+        )
+
+        for mask in [bright_mask, adaptive_mask]:
+            # Clean up: close small gaps, remove noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
+
+            contours, _ = cv2.findContours(
+                cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            for contour in contours:
+                peri = cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, 0.03 * peri, True)
+
+                if len(approx) != 4:
+                    continue
+
+                # Filter by area: paper should be a reasonable fraction of frame
+                area = cv2.contourArea(approx)
+                area_fraction = area / frame_area
+                if area_fraction < 0.005 or area_fraction > 0.25:
+                    continue
+
+                # Check convexity (paper should be convex)
+                if not cv2.isContourConvex(approx):
+                    continue
+
+                # Compute side lengths using the 4 corner points
+                # (perspective-corrected, not axis-aligned bounding box)
+                pts = approx.reshape(4, 2).astype(np.float64)
+                side_lengths = []
+                for i in range(4):
+                    side_lengths.append(np.linalg.norm(pts[(i+1) % 4] - pts[i]))
+
+                # Group into two pairs of opposite sides
+                s0, s1, s2, s3 = side_lengths
+                pair_a = (s0 + s2) / 2  # sides 0 and 2 are opposite
+                pair_b = (s1 + s3) / 2  # sides 1 and 3 are opposite
+
+                # Check that opposite sides are roughly equal (not a trapezoid)
+                if pair_a > 0 and pair_b > 0:
+                    opp_ratio_a = abs(s0 - s2) / max(s0, s2)
+                    opp_ratio_b = abs(s1 - s3) / max(s1, s3)
+                    if opp_ratio_a > 0.25 or opp_ratio_b > 0.25:
+                        continue
+
+                longest_px = max(pair_a, pair_b)
+                shortest_px = min(pair_a, pair_b)
+
+                if shortest_px < 20:
+                    continue
+
+                aspect = longest_px / shortest_px
+
+                # Tight aspect ratio check: A4 = 1.414, credit card = 1.585
+                # Allow ±0.15 tolerance (accounts for slight perspective)
+                if abs(aspect - expected_ratio) > 0.15:
+                    continue
+
+                # Check that region inside the contour is predominantly light
+                rect_mask = np.zeros_like(gray)
+                cv2.drawContours(rect_mask, [approx], -1, 255, -1)
+                mean_brightness = cv2.mean(gray, mask=rect_mask)[0]
+                if mean_brightness < 140:
+                    continue
+
+                # Compute pixels_per_cm using both dimensions for accuracy
+                # Longest side corresponds to longest real dimension
+                longest_cm = max(obj["width_cm"], obj["height_cm"])
+                shortest_cm = min(obj["width_cm"], obj["height_cm"])
+
+                ppc_long = longest_px / longest_cm
+                ppc_short = shortest_px / shortest_cm
+                ppc = (ppc_long + ppc_short) / 2  # average both dimensions
+
+                logger.debug(
+                    f"Contour detection: {longest_px:.0f}x{shortest_px:.0f}px, "
+                    f"ratio={aspect:.3f} (expected {expected_ratio:.3f}), "
+                    f"brightness={mean_brightness:.0f}, ppc={ppc:.2f}"
+                )
+                detections.append(float(ppc))
+
+    return detections
+
+
 def _get_rtdetr():
     """Lazily load HuggingFace RT-DETR model (Apache 2.0). NOT YOLOv8 (AGPL)."""
     global _rtdetr_model, _rtdetr_processor
@@ -130,54 +306,40 @@ def _get_rtdetr():
         logger.info("RT-DETR loaded successfully.")
         return _rtdetr_model, _rtdetr_processor
     except Exception as e:
-        logger.warning(f"Could not load RT-DETR: {e}. Falling back to contour detection.")
+        logger.warning(f"Could not load RT-DETR: {e}. Using contour detection only.")
         return None, None
-
-
-def _calibrate_known_object(
-    frames: list,
-    object_type: str,
-) -> CalibrationResult:
-    """Detect a known object (A4 paper or credit card) using RT-DETR.
-
-    Uses HuggingFace RT-DETR (Apache 2.0) for object detection.
-    NOT YOLOv8 — YOLOv8/Ultralytics is AGPL licensed.
-    """
-    obj = KNOWN_OBJECTS[object_type]
-
-    model, processor = _get_rtdetr()
-    if model is not None:
-        return _detect_with_rtdetr(frames, obj, model, processor)
-    else:
-        return _detect_with_contours(frames, obj, object_type)
 
 
 def _detect_with_rtdetr(
     frames: list,
     obj: dict,
+    expected_ratio: float,
     model,
     processor,
-) -> CalibrationResult:
-    """Detect known object using HuggingFace RT-DETR (Apache 2.0)."""
+) -> list:
+    """Fallback: detect known object using HuggingFace RT-DETR (Apache 2.0).
+
+    Only uses COCO "book" class (index 73) as the closest match to paper/card.
+    Much tighter filtering than before to avoid false positives.
+    """
     import torch
     from PIL import Image
 
-    expected_ratio = max(obj["width_cm"], obj["height_cm"]) / min(
-        obj["width_cm"], obj["height_cm"]
-    )
+    # COCO class IDs that could be paper-like objects
+    # 73 = "book" — closest to paper in COCO
+    paper_like_classes = {73}
 
-    # Cap to 10 evenly-spaced frames for better confidence without processing all 30
+    # Cap to 10 evenly-spaced frames
     max_sample = 10
     if len(frames) > max_sample:
         indices = [int(i * (len(frames) - 1) / (max_sample - 1)) for i in range(max_sample)]
         sampled_frames = [frames[i] for i in indices]
     else:
         sampled_frames = frames
-    logger.info(f"RT-DETR: processing {len(sampled_frames)} of {len(frames)} frames")
+    logger.info(f"RT-DETR fallback: processing {len(sampled_frames)} frames")
 
     detections = []
     for idx, frame in enumerate(sampled_frames):
-        logger.info(f"RT-DETR: frame {idx + 1}/{len(sampled_frames)}")
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb)
@@ -186,107 +348,52 @@ def _detect_with_rtdetr(
             with torch.no_grad():
                 outputs = model(**inputs)
 
-            # Post-process detections
             target_sizes = torch.tensor([image.size[::-1]])
             results = processor.post_process_object_detection(
-                outputs, target_sizes=target_sizes, threshold=0.3
+                outputs, target_sizes=target_sizes, threshold=0.4
             )[0]
 
-            for box, score in zip(results["boxes"], results["scores"]):
+            for box, score, label in zip(
+                results["boxes"], results["scores"], results["labels"]
+            ):
+                label_id = int(label.item())
+
+                # Only consider paper-like COCO classes
+                if label_id not in paper_like_classes:
+                    continue
+
                 box = box.cpu().numpy()
                 w = abs(box[2] - box[0])
                 h = abs(box[3] - box[1])
-                if w < 20 or h < 20:
+                if w < 30 or h < 30:
                     continue
 
                 ratio = max(w, h) / min(w, h)
-                if abs(ratio - expected_ratio) < 0.5:
-                    longest_px = max(w, h)
-                    longest_cm = max(obj["width_cm"], obj["height_cm"])
-                    ppc = longest_px / longest_cm
-                    detections.append(float(ppc))
+                # Tighter ratio check: ±0.2
+                if abs(ratio - expected_ratio) > 0.2:
+                    continue
+
+                # Size sanity: paper should be < 30% of frame
+                frame_h, frame_w = frame.shape[:2]
+                if (w * h) / (frame_w * frame_h) > 0.3:
+                    continue
+
+                longest_px = max(w, h)
+                shortest_px = min(w, h)
+                longest_cm = max(obj["width_cm"], obj["height_cm"])
+                shortest_cm = min(obj["width_cm"], obj["height_cm"])
+
+                ppc = ((longest_px / longest_cm) + (shortest_px / shortest_cm)) / 2
+                detections.append(float(ppc))
+                logger.debug(
+                    f"RT-DETR: class={label_id}, score={score:.2f}, "
+                    f"{w:.0f}x{h:.0f}px, ratio={ratio:.2f}, ppc={ppc:.2f}"
+                )
         except Exception as e:
             logger.warning(f"RT-DETR inference failed on frame: {e}")
             continue
 
-    if not detections:
-        return CalibrationResult(
-            pixels_per_cm=0.0,
-            confidence=0.0,
-            method_used="rtdetr",
-            warning=f"Could not detect {obj['label']} in any frame. Try holding it more visibly.",
-        )
-
-    median_ppc = float(np.median(detections))
-    confidence = min(0.75, len(detections) * 0.1)
-    if len(detections) >= 3:
-        std = float(np.std(detections))
-        cv_coeff = std / median_ppc if median_ppc > 0 else 1.0
-        confidence = min(0.75, max(0.2, 0.75 - cv_coeff * 3))
-
-    return CalibrationResult(
-        pixels_per_cm=median_ppc,
-        confidence=round(confidence, 2),
-        method_used="rtdetr",
-        warning="Object detection is less accurate than ArUco markers."
-        if confidence < 0.6
-        else None,
-    )
-
-
-def _detect_with_contours(
-    frames: list,
-    obj: dict,
-    object_type: str,
-) -> CalibrationResult:
-    """Fallback: detect rectangular object via contour analysis."""
-    expected_ratio = max(obj["width_cm"], obj["height_cm"]) / min(
-        obj["width_cm"], obj["height_cm"]
-    )
-
-    detections = []
-    for frame in frames:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
-
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours:
-            peri = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-
-            if len(approx) == 4:
-                x, y, w, h = cv2.boundingRect(approx)
-                if w < 30 or h < 30:
-                    continue
-                ratio = max(w, h) / min(w, h)
-                if abs(ratio - expected_ratio) < 0.4:
-                    area = cv2.contourArea(approx)
-                    frame_area = frame.shape[0] * frame.shape[1]
-                    if 0.005 < area / frame_area < 0.3:
-                        longest_px = max(w, h)
-                        longest_cm = max(obj["width_cm"], obj["height_cm"])
-                        ppc = longest_px / longest_cm
-                        detections.append(ppc)
-
-    if not detections:
-        return CalibrationResult(
-            pixels_per_cm=0.0,
-            confidence=0.0,
-            method_used="contour_fallback",
-            warning=f"Could not detect {obj['label']}. Ensure it's clearly visible and well-lit.",
-        )
-
-    median_ppc = float(np.median(detections))
-    confidence = min(0.5, len(detections) * 0.08)
-
-    return CalibrationResult(
-        pixels_per_cm=median_ppc,
-        confidence=round(confidence, 2),
-        method_used="contour_fallback",
-        warning="Using contour fallback — low confidence. Consider using an ArUco marker.",
-    )
+    return detections
 
 
 def _calibrate_height(height_cm: Optional[float]) -> CalibrationResult:
