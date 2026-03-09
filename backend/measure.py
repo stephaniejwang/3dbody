@@ -187,13 +187,19 @@ def extract_measurements(
     inseam = crotch_z - z_min_cm
     measurements["inseam"] = _fmt(inseam)
 
-    # Shoulder width (full X span at shoulder height — includes arm start)
+    # Shoulder width — use torso filter to exclude T-pose arm vertices.
+    # In T-pose, arms are at shoulder Z, so unfiltered X span = arm span.
+    # Torso filter at 1.3× catches deltoids but not the forearm.
     shoulder_z = z_min_cm + LANDMARK_Z_FRACTIONS["shoulder"] * height_cm
-    shoulder_width = _compute_width_at_height(verts_cm, shoulder_z, height_cm * 0.02)
+    shoulder_width = _compute_width_at_height(
+        verts_cm, shoulder_z, height_cm * 0.02,
+        torso_filter=(x_center, torso_half_width * 1.3),
+    )
     measurements["shoulder_width"] = _fmt(shoulder_width)
 
-    # Sleeve length (T-pose: shoulder to wrist along arm)
-    sleeve = _compute_sleeve_length(verts_cm, height_cm, z_min_cm)
+    # Sleeve length — in T-pose, arm extends horizontally at shoulder Z.
+    # Measure from shoulder (torso edge) to outermost arm vertex.
+    sleeve = _compute_sleeve_length_tpose(verts_cm, height_cm, z_min_cm)
     measurements["sleeve_length"] = _fmt(sleeve)
 
     return measurements
@@ -375,48 +381,61 @@ def _compute_width_at_height(
     vertices: np.ndarray,
     z_level: float,
     tolerance: float = 1.0,
+    torso_filter: Optional[tuple] = None,
 ) -> float:
+    """Compute X-span of vertices at a given Z-level.
+
+    Args:
+        torso_filter: Optional (x_center, half_width) to exclude arm vertices.
+    """
     mask = np.abs(vertices[:, 2] - z_level) < tolerance
     section_verts = vertices[mask]
     if len(section_verts) < 2:
         return 0.0
+
+    if torso_filter is not None:
+        x_center, half_width = torso_filter
+        section_verts = section_verts[
+            np.abs(section_verts[:, 0] - x_center) < half_width
+        ]
+        if len(section_verts) < 2:
+            return 0.0
+
     return float(section_verts[:, 0].max() - section_verts[:, 0].min())
 
 
-def _compute_sleeve_length(
+def _compute_sleeve_length_tpose(
     vertices: np.ndarray,
     height_cm: float,
     z_min: float,
 ) -> float:
-    """Estimate sleeve length (shoulder to wrist) in T-pose.
+    """Estimate sleeve length in T-pose (arm horizontal at shoulder Z).
 
-    In T-pose, the arm extends horizontally. We find the outermost
-    shoulder point and the outermost wrist point on the same side,
-    then compute Euclidean distance.
+    In T-pose, the arm extends horizontally at shoulder height.
+    Sleeve length = outermost arm point - shoulder pivot (torso edge),
+    measured on the right side.
     """
     shoulder_z = z_min + LANDMARK_Z_FRACTIONS["shoulder"] * height_cm
-    wrist_z = z_min + LANDMARK_Z_FRACTIONS["wrist"] * height_cm
-
-    shoulder_tol = 0.02 * height_cm
-    shoulder_mask = np.abs(vertices[:, 2] - shoulder_z) < shoulder_tol
-    shoulder_verts = vertices[shoulder_mask]
-
-    if len(shoulder_verts) < 2:
-        return 0.33 * height_cm
-
     x_center = float(np.median(vertices[:, 0]))
-    right_shoulder_verts = shoulder_verts[shoulder_verts[:, 0] > x_center]
-    if len(right_shoulder_verts) == 0:
-        return 0.33 * height_cm
-    shoulder_point = right_shoulder_verts[right_shoulder_verts[:, 0].argmax()]
+    torso_half = height_cm * 0.12
 
-    wrist_tol = 0.03 * height_cm
-    wrist_mask = (np.abs(vertices[:, 2] - wrist_z) < wrist_tol) & (
-        vertices[:, 0] > x_center
-    )
-    wrist_verts = vertices[wrist_mask]
-    if len(wrist_verts) == 0:
-        return 0.33 * height_cm
-    wrist_point = wrist_verts[wrist_verts[:, 0].argmax()]
+    # Arm vertices at shoulder level, on the right side, beyond torso edge
+    tol = height_cm * 0.03
+    right_arm = vertices[
+        (np.abs(vertices[:, 2] - shoulder_z) < tol) &
+        (vertices[:, 0] > x_center + torso_half)
+    ]
 
-    return float(np.linalg.norm(shoulder_point - wrist_point))
+    if len(right_arm) < 2:
+        # Fallback: use proportion-based estimate
+        return 0.33 * height_cm
+
+    # Sleeve = outermost arm point X - shoulder pivot X
+    outermost_x = float(right_arm[:, 0].max())
+    shoulder_pivot_x = x_center + torso_half
+
+    sleeve = outermost_x - shoulder_pivot_x
+    if sleeve < height_cm * 0.1:
+        return 0.33 * height_cm  # sanity check
+
+    return sleeve

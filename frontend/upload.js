@@ -146,10 +146,11 @@ document.querySelectorAll(".shoe-unit-btn").forEach((btn) => {
     });
 });
 
-// Gender toggle
-document.querySelectorAll(".gender-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-        document.querySelectorAll(".gender-btn").forEach((b) => b.classList.remove("active"));
+// Gender toggle — scoped to #gender-toggle to avoid conflicts
+document.querySelectorAll("#gender-toggle .gender-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        document.querySelectorAll("#gender-toggle .gender-btn").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         selectedGender = btn.dataset.gender;
     });

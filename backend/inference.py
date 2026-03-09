@@ -92,6 +92,100 @@ class InferenceEngine:
         ])
         return all_tri[body_mask]
 
+    def _to_tpose(self, vertices: np.ndarray) -> np.ndarray:
+        """Rotate A-pose arms to T-pose (horizontal).
+
+        Anny's rest pose has arms in A-pose (angled below horizontal).
+        This finds the shoulder pivot points and current arm angle, then
+        smoothly rotates arm vertices upward using distance-based blending
+        (Hermite smoothstep) so the transition at the shoulder is seamless.
+
+        Rotation is in the XZ plane (Z=up in Anny) around a Y-axis at
+        each shoulder pivot point.
+        """
+        verts = vertices.copy()
+
+        x_center = float(np.median(verts[:, 0]))
+        z_min = float(verts[:, 2].min())
+        z_max = float(verts[:, 2].max())
+        height = z_max - z_min
+
+        if height <= 0:
+            return verts
+
+        shoulder_z = z_min + 0.82 * height
+        torso_half = height * 0.12
+
+        for side in [1, -1]:  # +1 = positive X side, -1 = negative X side
+            pivot_x = x_center + side * torso_half
+            pivot_z = shoulder_z
+
+            # Find far arm vertices to determine current arm angle
+            far_mask = (
+                ((verts[:, 0] - x_center) * side > torso_half * 2) &
+                (verts[:, 2] > z_min + 0.40 * height)
+            )
+
+            if far_mask.sum() < 5:
+                continue
+
+            # Arm endpoint: centroid of the outermost vertices on this side
+            far_verts = verts[far_mask]
+            outermost_x = float(far_verts[:, 0].max()) if side > 0 else float(far_verts[:, 0].min())
+            outer_band = np.abs(far_verts[:, 0] - outermost_x) < height * 0.03
+            if outer_band.sum() < 1:
+                continue
+            arm_end = far_verts[outer_band].mean(axis=0)
+
+            # Current arm vector from shoulder pivot to arm endpoint
+            outward_x = (arm_end[0] - pivot_x) * side  # always positive
+            downward_z = pivot_z - arm_end[2]           # positive if arm below shoulder
+
+            if outward_x < height * 0.05:
+                continue
+
+            # Angle the arm drops below horizontal
+            arm_angle = float(np.arctan2(downward_z, outward_x))
+            if abs(arm_angle) < np.radians(2):
+                continue  # already nearly horizontal
+
+            # Full rotation needed (sign depends on arm side)
+            # Right arm (+X): rotate CCW in XZ → theta negative
+            # Left arm (-X): rotate CW in XZ → theta positive
+            theta_full = -side * arm_angle
+            arm_length_x = outward_x
+
+            # Select candidate arm vertices: beyond pivot, above hip level
+            arm_cand = (
+                ((verts[:, 0] - pivot_x) * side > 0) &
+                (verts[:, 2] > z_min + 0.40 * height) &
+                (verts[:, 2] < z_min + 0.95 * height)
+            )
+
+            indices = np.where(arm_cand)[0]
+            if len(indices) == 0:
+                continue
+
+            # Distance-based blend: 0 at shoulder, 1 at wrist/hand
+            out_dists = (verts[indices, 0] - pivot_x) * side
+            t = np.clip(out_dists / arm_length_x, 0.0, 1.0)
+            blend = t * t * (3.0 - 2.0 * t)  # Hermite smoothstep
+
+            # Per-vertex rotation angle
+            theta = theta_full * blend
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+
+            # Rotate each vertex in XZ plane around the shoulder pivot
+            rx = verts[indices, 0] - pivot_x
+            rz = verts[indices, 2] - pivot_z
+
+            verts[indices, 0] = rx * cos_t + rz * sin_t + pivot_x
+            verts[indices, 2] = -rx * sin_t + rz * cos_t + pivot_z
+
+        logger.info("A-pose → T-pose arm rotation applied.")
+        return verts
+
     def run(self, frame: np.ndarray, gender: str = None) -> InferenceResult:
         """Run inference on a single BGR frame.
 
@@ -131,8 +225,9 @@ class InferenceEngine:
                 phenotype_kwargs=phenotypes,
             )
 
-        # rest_vertices are in T-pose, which is what we want for measurements
+        # rest_vertices are in A-pose — rotate arms to T-pose for cleaner display
         vertices = result["rest_vertices"][0].cpu().numpy().astype(np.float32)
+        vertices = self._to_tpose(vertices)
 
         return InferenceResult(
             vertices=vertices,

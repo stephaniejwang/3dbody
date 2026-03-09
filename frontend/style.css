@@ -206,40 +206,6 @@ h1 {
     color: var(--accent-yellow);
 }
 
-/* Gender selection */
-.gender-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
-}
-.gender-row label {
-    font-size: 0.85rem;
-    color: var(--text-muted);
-}
-.gender-toggle {
-    display: flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-}
-.gender-btn {
-    padding: 6px 20px;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 500;
-    transition: background 0.2s, color 0.2s;
-}
-.gender-btn.active {
-    background: var(--primary);
-    color: #fff;
-}
-.gender-btn:hover:not(.active) {
-    background: var(--surface-hover);
-}
 
 /* Body info row (height + shoe size side by side) */
 .body-info-row {
