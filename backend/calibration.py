@@ -238,10 +238,13 @@ def _detect_paper_near_hands(
     obj: dict,
     expected_ratio: float,
 ) -> list:
-    """Detect white rectangular object near detected hand positions.
+    """Detect white rectangular object held in hand.
 
-    Uses MediaPipe Pose to find wrist locations, then searches for
-    paper contours only within a radius around each hand.
+    Two approaches run in parallel:
+      A) 4-corner contour detection on clean paper (no hand occlusion)
+      B) Collect all white pixels near each hand, apply large morphological
+         closing to bridge the hand gap, then use minAreaRect on the
+         resulting blob. This handles hand-on-paper occlusion.
     """
     detections = []
 
@@ -256,96 +259,156 @@ def _detect_paper_near_hands(
             logger.debug("No hands detected in frame — skipping")
             continue
 
-        # Threshold for white/light regions (paper is white)
+        # --- Approach A: clean 4-corner contour ---
         _, bright_mask = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+        small_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        cleaned_a = cv2.morphologyEx(bright_mask, cv2.MORPH_CLOSE, small_kernel)
+        cleaned_a = cv2.morphologyEx(cleaned_a, cv2.MORPH_OPEN, small_kernel)
 
-        # Also try adaptive threshold for uneven lighting
-        adaptive_mask = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 51, -10
+        contours_a, _ = cv2.findContours(
+            cleaned_a, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        for mask in [bright_mask, adaptive_mask]:
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
+        for contour in contours_a:
+            ppc = _check_paper_contour(contour, gray, hand_regions,
+                                        frame_area, expected_ratio, obj)
+            if ppc is not None:
+                detections.append(ppc)
 
-            contours, _ = cv2.findContours(
-                cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        # --- Approach B: morphological closing to bridge hand gap ---
+        # The hand covering paper creates a gap in the white region.
+        # A large closing kernel (proportional to expected paper size)
+        # bridges that gap, recovering the full paper outline.
+        for threshold_val in [160, 180]:
+            _, mask_b = cv2.threshold(gray, threshold_val, 255, cv2.THRESH_BINARY)
+
+            # Large closing kernel — sized to bridge a hand width
+            # At typical phone camera distance, hand covers ~40-80px of paper
+            close_size = max(40, frame_h // 30)
+            big_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (close_size, close_size)
+            )
+            closed = cv2.morphologyEx(mask_b, cv2.MORPH_CLOSE, big_kernel)
+            # Clean small noise
+            closed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, small_kernel)
+
+            contours_b, _ = cv2.findContours(
+                closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
 
-            for contour in contours:
-                peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.03 * peri, True)
-
-                if len(approx) != 4:
+            for contour in contours_b:
+                # Must be near a hand
+                if not _is_near_hand(contour, hand_regions):
                     continue
 
-                # Must be near a detected hand
-                if not _is_near_hand(approx, hand_regions):
-                    continue
-
-                # Filter by area
-                area = cv2.contourArea(approx)
+                area = cv2.contourArea(contour)
                 area_fraction = area / frame_area
-                if area_fraction < 0.003 or area_fraction > 0.2:
+                if area_fraction < 0.003 or area_fraction > 0.25:
                     continue
 
-                if not cv2.isContourConvex(approx):
+                # Use minAreaRect — gives the tightest rotated rectangle
+                # around the blob, which should match the full paper extent
+                rect = cv2.minAreaRect(contour)
+                (cx, cy), (w, h), angle = rect
+
+                if w < 20 or h < 20:
                     continue
 
-                # Perspective-corrected side lengths
-                pts = approx.reshape(4, 2).astype(np.float64)
-                side_lengths = []
-                for i in range(4):
-                    side_lengths.append(np.linalg.norm(pts[(i+1) % 4] - pts[i]))
-
-                s0, s1, s2, s3 = side_lengths
-                pair_a = (s0 + s2) / 2
-                pair_b = (s1 + s3) / 2
-
-                # Opposite sides should be roughly equal
-                if pair_a > 0 and pair_b > 0:
-                    opp_ratio_a = abs(s0 - s2) / max(s0, s2)
-                    opp_ratio_b = abs(s1 - s3) / max(s1, s3)
-                    if opp_ratio_a > 0.3 or opp_ratio_b > 0.3:
-                        continue
-
-                longest_px = max(pair_a, pair_b)
-                shortest_px = min(pair_a, pair_b)
-
-                if shortest_px < 20:
-                    continue
-
+                longest_px = max(w, h)
+                shortest_px = min(w, h)
                 aspect = longest_px / shortest_px
 
-                # Tight aspect ratio: A4 = 1.414 ± 0.2
-                if abs(aspect - expected_ratio) > 0.2:
+                if abs(aspect - expected_ratio) > 0.25:
                     continue
 
-                # Check brightness inside contour (paper is white/light)
+                # Check brightness of the region (should be mostly white)
+                box_pts = cv2.boxPoints(rect).astype(np.int32)
                 rect_mask = np.zeros_like(gray)
-                cv2.drawContours(rect_mask, [approx], -1, 255, -1)
+                cv2.drawContours(rect_mask, [box_pts], -1, 255, -1)
                 mean_brightness = cv2.mean(gray, mask=rect_mask)[0]
-                if mean_brightness < 130:
+                # Lower threshold here because hand pixels are included
+                if mean_brightness < 110:
                     continue
 
                 # Compute pixels_per_cm from both dimensions
                 longest_cm = max(obj["width_cm"], obj["height_cm"])
                 shortest_cm = min(obj["width_cm"], obj["height_cm"])
-
                 ppc_long = longest_px / longest_cm
                 ppc_short = shortest_px / shortest_cm
                 ppc = (ppc_long + ppc_short) / 2
 
                 logger.info(
-                    f"Paper detected near hand: {longest_px:.0f}x{shortest_px:.0f}px, "
+                    f"Paper (closed blob): {longest_px:.0f}x{shortest_px:.0f}px, "
                     f"ratio={aspect:.3f}, brightness={mean_brightness:.0f}, "
                     f"ppc={ppc:.2f}"
                 )
                 detections.append(float(ppc))
 
     return detections
+
+
+def _check_paper_contour(
+    contour: np.ndarray,
+    gray: np.ndarray,
+    hand_regions: list,
+    frame_area: int,
+    expected_ratio: float,
+    obj: dict,
+) -> Optional[float]:
+    """Check if a single contour is an A4/credit card. Returns ppc or None."""
+    peri = cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, 0.03 * peri, True)
+
+    if len(approx) != 4:
+        return None
+
+    if not _is_near_hand(approx, hand_regions):
+        return None
+
+    area = cv2.contourArea(approx)
+    if area / frame_area < 0.003 or area / frame_area > 0.2:
+        return None
+
+    if not cv2.isContourConvex(approx):
+        return None
+
+    pts = approx.reshape(4, 2).astype(np.float64)
+    side_lengths = [np.linalg.norm(pts[(i+1) % 4] - pts[i]) for i in range(4)]
+    s0, s1, s2, s3 = side_lengths
+    pair_a = (s0 + s2) / 2
+    pair_b = (s1 + s3) / 2
+
+    if pair_a > 0 and pair_b > 0:
+        if abs(s0 - s2) / max(s0, s2) > 0.3:
+            return None
+        if abs(s1 - s3) / max(s1, s3) > 0.3:
+            return None
+
+    longest_px = max(pair_a, pair_b)
+    shortest_px = min(pair_a, pair_b)
+    if shortest_px < 20:
+        return None
+
+    aspect = longest_px / shortest_px
+    if abs(aspect - expected_ratio) > 0.2:
+        return None
+
+    rect_mask = np.zeros_like(gray)
+    cv2.drawContours(rect_mask, [approx], -1, 255, -1)
+    mean_brightness = cv2.mean(gray, mask=rect_mask)[0]
+    if mean_brightness < 130:
+        return None
+
+    longest_cm = max(obj["width_cm"], obj["height_cm"])
+    shortest_cm = min(obj["width_cm"], obj["height_cm"])
+    ppc = ((longest_px / longest_cm) + (shortest_px / shortest_cm)) / 2
+
+    logger.info(
+        f"Paper (4-corner): {longest_px:.0f}x{shortest_px:.0f}px, "
+        f"ratio={aspect:.3f}, brightness={mean_brightness:.0f}, "
+        f"ppc={ppc:.2f}"
+    )
+    return float(ppc)
 
 
 def _calibrate_height(height_cm: Optional[float]) -> CalibrationResult:
