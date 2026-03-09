@@ -103,6 +103,7 @@ async def upload(
     height_cm: Optional[float] = Form(None),
     shoe_size: Optional[float] = Form(None),
     shoe_unit: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
 ):
     if engine is None:
         raise HTTPException(
@@ -145,6 +146,7 @@ async def upload(
         "height_cm": height_cm,
         "shoe_size": shoe_size,
         "shoe_unit": shoe_unit or "us",
+        "gender": gender,
     })
 
     return {"job_id": job_id}
@@ -273,6 +275,7 @@ def _process_job(job_data: dict, job_id: str) -> dict:
     height_cm = job_data["height_cm"]
     shoe_size = job_data.get("shoe_size")
     shoe_unit = job_data.get("shoe_unit", "us")
+    gender = job_data.get("gender")
 
     # Step 1: Extract keyframes
     _update_progress(job_id, "Extracting frames...")
@@ -296,7 +299,7 @@ def _process_job(job_data: dict, job_id: str) -> dict:
     _update_progress(job_id, "Detecting pose...")
     best_frame = _select_best_frame(frames)
     logger.info(f"Selected best frame, running MediaPipe + Anny...")
-    inf_result: InferenceResult = engine.run(best_frame)
+    inf_result: InferenceResult = engine.run(best_frame, gender=gender)
     logger.info(f"Inference done: {inf_result.vertices.shape[0]} vertices")
     _update_progress(job_id, "Recovering body mesh...")
 

@@ -73,6 +73,7 @@ function initScene() {
     controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.zoomSpeed = 3.0;
     controls.target.set(0, 85, 0);
     controls.update();
 

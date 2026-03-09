@@ -62,15 +62,20 @@ class InferenceEngine:
         logger.info("MediaPipe Pose loaded.")
 
     def _get_body_faces(self) -> np.ndarray:
-        """Get triangular faces excluding eyeball and inner-mouth geometry.
+        """Get triangular faces excluding eyeball and tongue geometry.
 
-        Anny's fullbody mesh includes separate eyeball spheres and mouth
-        interior driven by facial bones (eye.L, eye.R, jaw, tongue*).
-        These look wrong when rendered, so we exclude any face that has
-        a vertex weighted to these bones.
+        Anny's fullbody mesh includes separate eyeball spheres and tongue
+        interior driven by specific bones. These look wrong when rendered,
+        so we exclude faces weighted to these bones.
+
+        We keep the jaw bone (104) because it controls chin, jaw, and neck
+        geometry that is visible and important for the body silhouette.
+        Only eyeballs (143, 148) and tongue bones (112-122) are removed.
         """
-        # Facial bone indices: eye.L=143, eye.R=148, jaw=104, tongue=112-122
-        facial_bone_ids = {104, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 143, 148}
+        # Eyeball bones: eye.L=143, eye.R=148
+        # Tongue bones: 112-122
+        # NOTE: jaw=104 is intentionally KEPT — it drives visible chin/neck geometry
+        facial_bone_ids = {112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 143, 148}
 
         vbi = self.anny_model.vertex_bone_indices  # (V, 8)
         facial_vert_mask = torch.zeros(vbi.shape[0], dtype=torch.bool)
@@ -87,13 +92,18 @@ class InferenceEngine:
         ])
         return all_tri[body_mask]
 
-    def run(self, frame: np.ndarray) -> InferenceResult:
+    def run(self, frame: np.ndarray, gender: str = None) -> InferenceResult:
         """Run inference on a single BGR frame.
 
         Steps:
           1. Detect pose landmarks via MediaPipe
           2. Estimate phenotype parameters from body proportions
           3. Generate Anny mesh in T-pose
+
+        Args:
+            frame: BGR image frame
+            gender: Optional explicit gender ("male" or "female").
+                    If provided, overrides auto-detection from pose.
         """
         # Detect pose
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -105,7 +115,7 @@ class InferenceEngine:
         landmarks = pose_result.pose_landmarks.landmark
 
         # Estimate phenotypes from pose landmarks
-        phenotypes = self._estimate_phenotypes(landmarks, frame.shape)
+        phenotypes = self._estimate_phenotypes(landmarks, frame.shape, gender=gender)
 
         # Measure person's pixel height (head-top to feet) for reference-object calibration.
         # MediaPipe doesn't have a "top of head" landmark, so we estimate it:
@@ -207,12 +217,18 @@ class InferenceEngine:
             logger.info("Could not measure foot length — landmarks not visible")
             return 0.0
 
-    def _estimate_phenotypes(self, landmarks, frame_shape: tuple) -> dict:
+    def _estimate_phenotypes(self, landmarks, frame_shape: tuple, gender: str = None) -> dict:
         """Estimate Anny phenotype parameters from MediaPipe pose landmarks.
 
         MediaPipe provides 33 landmarks with (x, y, z) in normalized coords.
         We use body proportions to estimate gender, height, weight, etc.
         All Anny phenotype params are in [0, 1] range.
+
+        Args:
+            landmarks: MediaPipe pose landmarks
+            frame_shape: (height, width, channels) of the frame
+            gender: Optional explicit gender ("male" or "female").
+                    Anny: 1.0 = male, 0.0 = female.
         """
         h, w = frame_shape[:2]
 
@@ -246,12 +262,19 @@ class InferenceEngine:
         body_height_px = dist(NOSE, L_ANKLE)
 
         # ----- Gender -----
-        # Shoulder-to-hip ratio: male ~1.4–1.6, female ~1.0–1.2
-        if hip_width > 0:
-            sh_ratio = shoulder_width / hip_width
+        # Use explicit gender selection if provided, otherwise auto-detect.
+        # Anny: 1.0 = male, 0.0 = female
+        if gender is not None and gender in ("male", "female"):
+            gender_val = 1.0 if gender == "male" else 0.0
+            logger.info(f"Using explicit gender: {gender} ({gender_val})")
         else:
-            sh_ratio = 1.0
-        gender = np.clip((sh_ratio - 1.05) / 0.55, 0.0, 1.0)
+            # Auto-detect from shoulder-to-hip ratio: male ~1.4–1.6, female ~1.0–1.2
+            if hip_width > 0:
+                sh_ratio = shoulder_width / hip_width
+            else:
+                sh_ratio = 1.0
+            gender_val = float(np.clip((sh_ratio - 1.05) / 0.55, 0.0, 1.0))
+            logger.info(f"Auto-detected gender: {gender_val:.2f}")
 
         # ----- Weight / build -----
         # Use multiple cues: shoulder/height ratio + hip/height ratio + torso width
@@ -297,7 +320,7 @@ class InferenceEngine:
         age = 0.5
 
         return {
-            "gender": float(gender),
+            "gender": float(gender_val),
             "age": float(age),
             "muscle": float(muscle),
             "weight": float(weight),

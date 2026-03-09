@@ -47,6 +47,7 @@ const cameraBtn = document.getElementById("camera-btn");
 let selectedFile = null;
 let heightUnit = "cm"; // "cm" or "in"
 let shoeUnit = "us"; // "us", "eu", or "uk"
+let selectedGender = "male"; // "male" or "female"
 let currentJobId = null;
 let recalUnit = "cm";
 
@@ -145,6 +146,15 @@ document.querySelectorAll(".shoe-unit-btn").forEach((btn) => {
     });
 });
 
+// Gender toggle
+document.querySelectorAll(".gender-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".gender-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        selectedGender = btn.dataset.gender;
+    });
+});
+
 // Init
 updateHeightRequired();
 
@@ -194,6 +204,7 @@ async function startUpload() {
     const formData = new FormData();
     formData.append("video", selectedFile);
     formData.append("reference_mode", referenceMode);
+    formData.append("gender", selectedGender);
     if (heightCm !== null) {
         formData.append("height_cm", heightCm.toString());
     }
